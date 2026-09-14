@@ -1,101 +1,69 @@
-# AI Chessathon starter
+# AI Chess Hackathon<br><sub>Sponsored by Optiver</sub>
 
-Fork this to build an agent for [AI Chessathon](https://aichessathon.com). It gives you a working
-submission, baselines to beat, and a local harness that speaks the same protocol and enforces the
-same clock as the platform, so you can see whether a change actually helped before you upload it.
+My submission for an AI Chess Hackathon, my submission was ranked top 30% (out of 465).
 
-```
-git clone https://github.com/advitrocks9/aichessathon-starter
-cd aichessathon-starter
-make setup
-make play
-```
+This repository is forked from [advitrocks9/aichessathon-starter](https://github.com/advitrocks9/aichessathon-starter).
 
-That plays your agent against a baseline over a full 120 s + 0.5 s game and prints the result.
-When you like it, `make zip` and drop `submission.zip` on your dashboard.
+![Team dashboard](docs/images/dashboard.png)
 
-## Writing an agent
+![Leaderboard](docs/images/leaderboard.png)
 
-`agent.py` is the whole submission. One function.
+## Unorthodox features
 
-```python
-def get_move(fen: str, time_left_ms: int) -> str:
-    return "e2e4"
-```
+Because I found out about the competition the night before the finals, I had no practice
+rounds and thought of drawing up more unconventional strategies to try and gain an edge. I got 3 main ideas looking at some of the games and the initial code.
 
-The fork ships a legal random-mover, so the loop works before you write anything. Replace the body.
+**Opponent clock estimation.** The agent process is suspended while the opponent thinks,
+so there is no way to observe them directly. But `time.monotonic()` is wall clock and
+keeps running through suspension, so recording it at the end of one move and the start of
+the next recovers the opponent's think time. Accumulated across the game against the known
+120s + 0.5s time control, that gives a running estimate of their remaining clock. On the
+competition hardware it tracked the referee's own figures to within about 15ms per move.
 
-```
-make play                                          # one game, real time control
-make arena                                         # 16 fast games, prints a score
-make play FEN="<fen>"                              # start from a given position
-uv run python -m harness.play --black baselines/minimax --pgn game.pgn
-uv run python -m harness.arena --opponent ../my-old-version --games 200
-uv run python -m harness.arena --pgn-dir games
-```
+**Flag pressure.** The estimator feeds a behaviour change. When the opponent is short of
+time and we are not, keeping material on the board is scored as good: complications are
+harder for them to navigate under time pressure, and our own search gets cheaper as pieces
+come off, so the trade is doubly in our favour.
 
-- Anything your agent prints shows up under the result, so `print` debugging works. The platform
-  keeps the first 4 KB and the last 4 KB, and so does the harness.
-- Every rated game leaves a log on your dashboard beside the PGN with your output, your init time,
-  your move times and your clock. Only your team can read it.
-- Games replay. The opening and the baseline's seed both come from the game number, so a
-  deterministic agent plays the same games every run and a score change is a change you made. The
-  random mover it ships with is not deterministic, so `make arena` wanders until you replace it.
+**Contempt and repetition tracking.** The agent only receives positions where it is to
+move, so it accumulates its own position history to know when it is walking into a
+repetition the referee would claim automatically. A draw is then scored slightly against
+the root side, which pushes the engine away from trading into sterile equality. Across 29
+rated games the agent drew none of them, in a field where the leading teams drew half.
 
-## The ladder
+## Main features/approach
 
-Measured with `harness/arena.py`. Beating greedy is a search. Beating minimax is a search plus an
-evaluation worth searching with.
+A classical alpha-beta engine on top of python-chess. Everything is written from
+ordinary chess principles; no third party engine, network, or tuned tables are used.
 
-| Matchup | Games | Time control | Score |
-|---|---|---|---|
-| random vs greedy | 32 | 10 s + 0.1 s | 4.7% +- 5.1% (+0 =3 -29) |
-| greedy vs minimax | 16 | 120 s + 0.5 s | 0.0% (+0 =0 -16) |
-| numba vs minimax | 16 | 10 s + 0.5 s | 59.4% +- 16.1% (+5 =9 -2) |
+**Search.** Fail-soft negamax with alpha-beta and iterative deepening, over a
+transposition table that persists for the whole game. Null-move pruning, check
+extensions, late move reductions and late move pruning, futility and reverse futility
+pruning, aspiration windows, and principal variation search. Quiescence runs over
+captures, filtered by static exchange evaluation and delta pruning.
 
-Read the third row twice. 59.4% looks like an edge, but the interval runs from -47 to +195 elo, so
-sixteen games have not found one. That is why `make arena` prints it.
+**Move ordering.** Hash move, then winning and equal captures by MVV-LVA, then killer
+moves, then quiet moves by history heuristic, then losing captures last. Ordering is
+worth more than anything else in the search at these node rates, so it got the most
+attention.
 
-```
-uv run python -m harness.arena --agent baselines/random --opponent baselines/greedy --games 32
-uv run python -m harness.arena --agent baselines/greedy --opponent baselines/minimax --games 16 \
-  --base-ms 120000 --increment-ms 500
-uv run python -m harness.arena --agent baselines/numba --opponent baselines/minimax --games 16 \
-  --increment-ms 500
-```
+**Evaluation.** Material, hand-written piece-square tables tapered between midgame and
+endgame, passed pawns scaled by rank, connected passers, doubled and isolated pawns,
+bishop pair, rooks on open files, a pawn shield in front of the king, and light mobility.
+The passed pawn terms came from reading games off the leaderboard, where two of the three
+I studied were decided by a pawn race.
 
-- `baselines/random` plays a uniformly random legal move. It is what `agent.py` starts as, minus
-  the seed the baselines take from the harness.
-- `baselines/greedy` searches one ply on material.
-- `baselines/minimax` searches two plies on material and mobility, with no time management.
-- `baselines/numba` is `minimax` with the evaluation jitted. It is barely stronger, which is the
-  point. Jitting a shallow search buys headroom, not depth. Read it for the warm-up call at the
-  bottom, which is how you keep compilation off your clock.
+**Time.** A soft budget stops new iterations and a hard budget aborts mid-search, falling
+back to the last completed iteration via an exception raised from the search. A forced
+mate returns immediately rather than spending the rest of the budget re-proving it. All
+table building and a warm-up search happen at import, inside the free 90s init budget
+rather than on the match clock.
 
-## What's here
-
-```
-agent.py             your submission
-baselines/           random, greedy, minimax, numba; each is a directory with an agent.py
-harness/runner.py    the process the platform runs your agent in
-harness/referee.py   the clock, legality, draw and cap rules
-harness/rules.py     the event constants, and eight openings the rated ladder plays
-harness/sandbox.py   the one process, spoken to as the platform speaks to a container
-harness/play.py      one game between two agent directories
-harness/arena.py     many games, with a score and an interval
-harness/package.py   builds submission.zip and plays the platform's two smoke games from it
-docs/IDEAS.md        where the strength actually comes from
-```
-
-- `make zip` ships `agent.py`, every python file beside it, `weights/`, and any package you
-  import. Add the rest with `--include`.
-- It then plays the platform's two smoke games out of the zip it just built, so a file you never
-  packaged fails here in a minute instead of costing one of your ten daily uploads.
-- The platform decides acceptance and its validation log is the authority.
-- Local games start from one of the eight openings unless you pass `--fen`. Rated games draw from
-  the full set, which is not published. Treat the eight as a sample, not preparation.
+**Safety.** The whole of `get_move` is wrapped so any exception falls through to a legal
+move rather than a crash, and the chosen move is validated against the legal move list
+before it is returned. A crash or an illegal move loses the game outright, and a real
+share of the field lost games that way.
 
 ## The rules
 
-[aichessathon.com/docs](https://aichessathon.com/docs) is canonical and changes. Read it before
-you upload.
+The competition rules are at [aichessathon.com/docs](https://aichessathon.com/docs).
